@@ -29,13 +29,20 @@ Dijkstra hop is short and has little room to stray from the outline.
 
 ### Fidelity metrics
 
-The route is scored against the target outline with complementary measures (all in `gen.py`):
+The route is scored against the target outline with complementary measures (all in `gen.py`),
+each catching a failure the others miss:
 
-- **Fréchet** — respects order; punishes out-of-sequence detours that pointwise metrics miss.
-- **Hausdorff** — worst-case point-to-curve distance.
+- **Fréchet** — order-aware *worst-case* leash; punishes out-of-sequence detours that pointwise metrics miss.
+- **Hausdorff** — worst-case point-to-curve distance (single largest excursion).
 - **IoU** — area overlap of the two thickened outlines.
 - **Perceptual cost** — blur-tolerant render-and-compare (`1 − soft-IoU`); judges the overall gestalt the way the eye does.
+- **DTW** — cyclic Dynamic Time Warping: like Fréchet but *sums* the leash over the best alignment instead of taking its max, so it rewards hugging the outline everywhere rather than only at the worst point. Tries cyclic start offsets and both winding directions, since the loops have no canonical start.
+- **Turning distance** — compares the curves' *turning-angle vs. arc-length* signatures: a translation/rotation/scale-invariant measure of **form** (corners, protrusions) that is sharp about real features yet ignores staircase jitter.
 - **On-land %** and **distance** — sanity/runnability checks.
+
+Reading them together tells you *how* a result is good or bad: Fréchet/DTW for path order
+(worst vs. average), Hausdorff for a single bad excursion, IoU for overall area, and turning
+distance for whether the corners and protrusions land in the right places.
 
 ---
 

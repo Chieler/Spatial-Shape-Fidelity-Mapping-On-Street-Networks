@@ -802,6 +802,75 @@ def frechet(route, contour, samples=140):
     return float(ca[-1, -1])
 
 
+def _dtw_pair(P, Q):
+    """Summed-distance DTW between two equal-length point arrays (lower better)."""
+    D = np.linalg.norm(P[:, None, :] - Q[None, :, :], axis=2)
+    n, m = D.shape
+    acc = np.empty((n, m))
+    acc[0, 0] = D[0, 0]
+    for i in range(1, n):
+        acc[i, 0] = acc[i - 1, 0] + D[i, 0]
+    for j in range(1, m):
+        acc[0, j] = acc[0, j - 1] + D[0, j]
+    for i in range(1, n):
+        prev, cur = acc[i - 1], acc[i]
+        for j in range(1, m):
+            cur[j] = D[i, j] + min(prev[j], prev[j - 1], cur[j - 1])
+    return float(acc[-1, -1]) / (n + m)        # normalize by alignment-path scale
+
+
+def dtw(route, contour, samples=120, offsets=12):
+    """Cyclic Dynamic Time Warping between two closed curves (lower is better).
+
+    DTW finds the same kind of monotonic alignment as Frechet, but *sums* the
+    leash over the alignment instead of taking its max. Frechet is hostage to the
+    single hardest point (one star tip), so it can't separate a route that hugs
+    the whole outline from one that only nails the worst spot; DTW's running
+    total rewards tracking the shape everywhere, breaking those ties toward
+    tighter fits. Because these are *closed* loops with no canonical start, we
+    try a handful of cyclic offsets (and both winding directions) of the target
+    and keep the best -- otherwise a correct route that merely begins at a
+    different point on the loop would score as a mismatch.
+    """
+    P = resample(route, n=samples)[:-1]        # drop the duplicated closing point
+    Q = resample(contour, n=samples)[:-1]
+    n = len(Q)
+    step = max(1, n // offsets)
+    best = np.inf
+    for Qd in (Q, Q[::-1]):                     # both winding directions
+        for k in range(0, n, step):
+            best = min(best, _dtw_pair(P, np.roll(Qd, k, axis=0)))
+    return best
+
+
+def turning_distance(route, contour, samples=180):
+    """Turning-function (tangent-angle) distance between two closed curves.
+
+    Each curve is re-expressed as cumulative turning angle vs normalized arc
+    length -- a translation/scale/rotation-invariant signature of its *form*:
+    where the corners and protrusions are, not where the curve sits. Comparing
+    these signatures (min over cyclic start + winding, with a constant rotation
+    offset removed) answers "does the route bend like the shape". It is sharp
+    about real features (a beak, a leg) yet largely ignores staircase jitter,
+    which the position-based metrics (Frechet/Hausdorff) cannot separate out.
+    """
+    def signature(pts):
+        p = resample(pts, n=samples)[:-1]
+        d = np.diff(np.vstack([p, p[:1]]), axis=0)
+        return np.unwrap(np.arctan2(d[:, 1], d[:, 0]))
+
+    a = signature(route)
+    b0 = signature(contour)
+    n = len(a)
+    best = np.inf
+    for bd in (b0, b0[::-1]):                    # both winding directions
+        for k in range(n):
+            diff = a - np.roll(bd, k)
+            diff = diff - diff.mean()            # remove constant rotation offset
+            best = min(best, float(np.sqrt(np.mean(diff ** 2))))
+    return best
+
+
 def perceptual_cost(route, placed, res=128, blur=4.0):
     """Holistic, blur-tolerant shape distance via low-res render-and-compare.
 
