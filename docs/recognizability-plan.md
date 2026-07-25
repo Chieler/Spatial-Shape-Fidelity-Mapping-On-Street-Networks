@@ -157,6 +157,26 @@ Two delivery modes, both shipped:
   leaving the pick to the human, per doctrine.
   See [`engines-panel-chicago.png`](engines-panel-chicago.png).
 
+## The yardstick has to move with the warp (`warp_score_ref`)
+
+Raising the warp caps on their own barely changes the output, and the reason is
+in the selection cost, not the search. `build_route` bends the placed template
+onto the street fabric and routes *that*, but stage 2 scored the result against
+the **undeformed** placement — so every millimetre of the bend came back as
+error. The search was being offered freedom it could never cash in: it shopped
+for warps it would not buy, and settled on whatever needed the least deforming.
+
+Measured on the synthetic lattice (star, `bend_template=True`, bend moved the
+outline 0.21 avg-edges): the same route scored `placement_cost` **0.1225**
+against the rigid placement and **0.1070** against the bent one — 13% of the
+cost was the charge for the bend itself.
+
+`warp_score_ref` (default `0.0`) slides the yardstick between the two via
+`warp_reference()`: `0.0` is the historical behaviour, `1.0` judges the route
+against the shape as actually deformed. It belongs *next to* the warp caps —
+raising one without the other is the no-op described above. Callers exposing a
+user-facing "how much may this be warped" control should move both together.
+
 ## Follow-ups
 - ~~Implement the **feature ledger** metric (§2)~~ **done**: `feature_ledger`
   in gen.py (macro-corners via RDP, cyclic order-preserving DP matching,

@@ -725,6 +725,11 @@ def bend_template(placed, grid, cfg):
 # --------------------------------------------------------------------------- #
 # Placement search                                                            #
 # --------------------------------------------------------------------------- #
+# Points the outline is probed at for the stage-1 proxy score and the on-land
+# guard. Shared so both stages measure "on land" over the same point density.
+_LAND_PROBE_N = 250
+
+
 def _score(placed, grid, scale, cfg, importance,
            feat_pts=None, feat_w=None, feat_share=0.0):
     """How routable a placement is, weighted by how much each point matters.
@@ -811,12 +816,44 @@ def _route_polyline(grid, placed, cfg, closed=True, flat_frac=1.0):
     return cleanup(grid, route, dense, wp_idx, w, cfg, close=closed), dense, waypoints
 
 
-def build_route(grid, placed, cfg):
-    """Run the full snap -> route -> cleanup pipeline for one placement."""
-    if cfg.get("bend_template", True):
-        placed = bend_template(placed, grid, cfg)
-    return _route_polyline(grid, placed, cfg, closed=True,
-                           flat_frac=cfg.get("flat_deviation_frac", 1.0))
+def build_route(grid, placed, cfg, return_target=False):
+    """Run the full snap -> route -> cleanup pipeline for one placement.
+
+    `return_target` appends the outline the route was actually drawn against --
+    the elastically bent template when bend_template is on, otherwise `placed`
+    itself. The search needs it to judge a route against the shape it was asked
+    to trace rather than the undeformed original (see `warp_reference`).
+    """
+    target = (bend_template(placed, grid, cfg)
+              if cfg.get("bend_template", True) else placed)
+    out = _route_polyline(grid, target, cfg, closed=True,
+                          flat_frac=cfg.get("flat_deviation_frac", 1.0))
+    return (*out, target) if return_target else out
+
+
+def warp_reference(placed, target, frac):
+    """The outline a routed placement is judged against.
+
+    The router draws against `target` -- the placement after elastic bending --
+    but scoring the result against the undeformed `placed` charges every
+    millimetre of that deformation as error, so the search systematically
+    prefers placements that need no warping however well the warped ones trace.
+    That is why raising the warp caps alone changes so little: it widens what
+    the search may *try* while the yardstick stays nailed to the original.
+
+    `frac` (cfg `warp_score_ref`) slides the yardstick: 0.0 judges against the
+    rigid original (the historical behaviour -- distortion is fully charged),
+    1.0 judges against the shape as actually deformed (distortion is free).
+    Both polylines are arc-length uniform over the same loop, so equal indices
+    are corresponding points and a straight lerp is a valid in-between shape.
+    """
+    target = np.asarray(target, dtype=np.float64)
+    if frac <= 0 or len(target) < 3:
+        return placed
+    ref = resample(placed, n=len(target))
+    if len(ref) != len(target):
+        return placed                      # no correspondence -> stay rigid
+    return (1.0 - frac) * ref + frac * target
 
 
 @dataclass
@@ -1062,7 +1099,7 @@ def search_placement(contour, grid, cfg, inners=None):
     # that carry its identity before asking streets to draw it (no-op when
     # template_vertices is falsy or the template is already that simple).
     contour = simplify_template(contour, cfg.get("template_vertices"))
-    base = resample(contour, n=250)          # cheap, transform-invariant proxy
+    base = resample(contour, n=_LAND_PROBE_N)   # cheap, transform-invariant proxy
     importance = waypoint_importance(base)   # which of those points define the shape
     s_lo, s_hi = cfg["scale_range"]
     lim = 0.5 - cfg["margin"]
@@ -1131,14 +1168,32 @@ def search_placement(contour, grid, cfg, inners=None):
     center = np.asarray(contour, np.float64).mean(axis=0)
     w_inner = cfg.get("inner_cost_weight", 0.6)
     w_recog = cfg.get("recognition_weight", 0.6)
+    warp_ref = cfg.get("warp_score_ref", 0.0)
     routed, tried, chosen_params = [], 0, []
     for proxy_score, params in results:
+        # The on-land / margin guard is a CONSTRAINT, not a preference: stage 1
+        # scores a violating placement -inf, but the sort still leaves it in the
+        # list, so without this the search happily routes a shape hanging in the
+        # river whenever the good placements run out. Skip them, and let the
+        # empty-`routed` fallback below handle "nothing at all fits".
+        if not np.isfinite(proxy_score):
+            continue
         if any(not _placement_far(params, q) for q in chosen_params):
             continue                                   # skip near-duplicate placement
-        chosen_params.append(params)
         placed = place(contour, *params)
-        route, _, _ = build_route(grid, placed, cfg)
+        # Re-check on the placed FULL contour: stage 1 judged a simplified,
+        # 250-point proxy, which can pull a limb back out of the water that the
+        # real outline still dips into. Probed at the proxy's resolution so the
+        # two stages agree on what "on land" means.
+        if not on_land(resample(placed, n=_LAND_PROBE_N), grid, cfg):
+            continue
+        chosen_params.append(params)
+        route, _, _, target = build_route(grid, placed, cfg, return_target=True)
         if len(route) >= 3:
+            # What the route is measured against -- the original placement, the
+            # bent one, or an in-between -- follows the warp budget (see
+            # `warp_reference`); at the default 0.0 this is exactly `placed`.
+            ref = warp_reference(placed, target, warp_ref)
             # Selection cost. placement_cost (perceptual soft-IoU + geometric)
             # maximizes area overlap, which can prefer a lumpy blob with slightly
             # more overlap over a placement whose FORM -- the corners, legs, beak
@@ -1148,9 +1203,9 @@ def search_placement(contour, grid, cfg, inners=None):
             # placement the overlap score ranked worse, and it is near-flat on
             # low-feature blobs so it stays quiet there. w_recog=0 restores the
             # pure overlap cost.
-            cost = placement_cost(route, placed)
+            cost = placement_cost(route, ref)
             if w_recog:
-                cost += w_recog * turning_distance(route, placed)
+                cost += w_recog * turning_distance(route, ref)
             feats = route_features(grid, inners, params, center, cfg)
             note = ""
             if feats:
@@ -1978,6 +2033,13 @@ CONFIG = dict(
     # original Manhattan-blocks rationale for the wide caps).
     aspect_max=1.15,          # max area-preserving stretch (1.0 = uniform scale)
     shear_max=0.05,           # max skew, for non-orthogonal grids
+    # How far the SELECTION yardstick moves with that warp (see warp_reference).
+    # 0.0 judges every routed candidate against the undeformed placement, so any
+    # bending is charged as error -- which is why raising the caps alone changes
+    # so little: the search wins back nothing for using the freedom. 1.0 judges
+    # against the shape as actually deformed. Keep the two in step; a wide cap
+    # under a rigid yardstick is a search shopping for warps it will not buy.
+    warp_score_ref=0.0,
     # Rotation cap around the drawn orientation (degrees), None = free spin.
     # OFF by default: the finished route is map art the viewer can rotate, so
     # orientation is a display concern, not an identity one -- a "vertical

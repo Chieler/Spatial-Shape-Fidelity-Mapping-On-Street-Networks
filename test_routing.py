@@ -92,8 +92,64 @@ def main():
 
     ledger_checks()
     dispatch_checks()
+    warp_reference_checks(lattice, spec.outer, cfg)
+    land_guard_checks()
 
     print("\nall routing checks passed")
+
+
+def warp_reference_checks(lattice, outer, cfg):
+    """The selection yardstick slides with the warp budget.
+
+    Without this the router draws against the BENT template but is scored
+    against the undeformed one, so bending is charged as error and raising the
+    warp caps buys the search nothing (docs/recognizability-plan.md).
+    """
+    placed = gen.place(outer, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, False)
+    bent = gen.resample(placed, n=97) + 0.01              # a stand-in deformation
+    check(np.allclose(gen.warp_reference(placed, bent, 0.0), placed),
+          "warp_reference: 0.0 keeps the rigid original as the yardstick")
+    check(np.allclose(gen.warp_reference(placed, bent, 1.0), bent),
+          "warp_reference: 1.0 judges against the deformed shape")
+    half = gen.warp_reference(placed, bent, 0.5)
+    check(np.allclose(half, 0.5 * gen.resample(placed, n=len(bent)) + 0.5 * bent),
+          "warp_reference: a fraction lands halfway between the two")
+
+    # End to end: the same route costs less against the shape it was drawn from.
+    bcfg = {**cfg, "bend_template": True}
+    route, _, _, target = gen.build_route(lattice, placed, bcfg, return_target=True)
+    check(len(target) >= 3 and not np.allclose(target, gen.resample(placed, n=len(target))),
+          "build_route(return_target) hands back the bent template it routed")
+    check(gen.placement_cost(route, target) < gen.placement_cost(route, placed),
+          "the rigid yardstick charges for the bend the router was told to make")
+
+
+def land_guard_checks():
+    """The on-land guard is a constraint, not a preference: a placement that
+    spills into the water is never surfaced, even when it scores well."""
+    cfg = dict(gen.CONFIG)
+    cfg.update(grid_size=41, grid_diagonals=False, n_random=600, n_refine=200,
+               n_route_eval=3, inner_features=False, bend_template=False,
+               engine=None, seed=3, min_land_fraction=0.99,
+               scale_range=(0.3, 0.5))   # small enough to fit on one dry bank
+    full = synthetic_grid(cfg)
+    # Carve a river: drop every node in a vertical band, and the edges into it.
+    wet = {n for n in full.node_keys if 0.55 <= n[0] <= 0.80}
+    graph = {n: [(m, d) for m, d in nbrs if m not in wet]
+             for n, nbrs in full.graph.items() if n not in wet}
+    keys = list(graph)
+    arr = np.array(keys, dtype=np.float64)
+    grid = gen.Grid(graph, keys, arr, cKDTree(arr), full.avg_edge,
+                    [(a, b) for a, b in full.edge_list if a not in wet and b not in wet],
+                    full.span, 0.0, 0.0, 0.0)
+
+    spec = gen.extract_shape("shapes/star.svg", 512)
+    ranked = search_placement(spec.outer, grid, cfg)
+    surfaced = [c for c in ranked if np.isfinite(c.cost)]
+    check(surfaced, "land guard: the search still finds placements on the dry half")
+    worst = min(gen.land_fraction(c.placed, grid, cfg["land_reach"]) for c in surfaced)
+    check(worst >= cfg["min_land_fraction"],
+          f"land guard: every surfaced placement is on land (worst {worst * 100:.0f}%)")
 
 
 def dispatch_checks():
