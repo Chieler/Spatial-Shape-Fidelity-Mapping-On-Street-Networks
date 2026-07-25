@@ -725,8 +725,9 @@ def bend_template(placed, grid, cfg):
 # --------------------------------------------------------------------------- #
 # Placement search                                                            #
 # --------------------------------------------------------------------------- #
-# Points the outline is probed at for the stage-1 proxy score and the on-land
-# guard. Shared so both stages measure "on land" over the same point density.
+# Points the outline is resampled to for the stage-1 proxy score -- cheap
+# enough to run over thousands of placements. Stage 2 re-tests the survivors on
+# the full outline, which is the authoritative one.
 _LAND_PROBE_N = 250
 
 
@@ -847,8 +848,10 @@ def warp_reference(placed, target, frac):
     Both polylines are arc-length uniform over the same loop, so equal indices
     are corresponding points and a straight lerp is a valid in-between shape.
     """
+    if frac <= 0 or target is placed:
+        return placed        # nothing was deformed -> nothing to forgive
     target = np.asarray(target, dtype=np.float64)
-    if frac <= 0 or len(target) < 3:
+    if len(target) < 3:
         return placed
     ref = resample(placed, n=len(target))
     if len(ref) != len(target):
@@ -1066,6 +1069,12 @@ def _dispatch_engine(contour, cfg):
     engine="auto" (default) picks by shape_compactness; an explicit engine
     name applies that ENGINE_PRESETS entry; None/False disables dispatch and
     the cfg is used as-is.
+
+    A preset is a *default bundle*, not a veto: anything in `cfg_overrides` is
+    re-applied on top of it. Without that channel a caller cannot tune a knob
+    the chosen family happens to name -- it hands in `aspect_max=1.8`, dispatch
+    quietly restores the family's 1.25, and every setting downstream of that
+    knob silently does nothing.
     """
     eng = cfg.get("engine", "auto")
     if not eng:
@@ -1074,7 +1083,8 @@ def _dispatch_engine(contour, cfg):
         c = shape_compactness(contour)
         eng = "recipe" if c <= cfg.get("compact_max_ipq", 2.0) else "classic"
         print(f"  engine: {eng} (compactness {c:.2f})")
-    return {**cfg, **ENGINE_PRESETS.get(eng, {}), "engine": eng}
+    return {**cfg, **ENGINE_PRESETS.get(eng, {}), "engine": eng,
+            **cfg.get("cfg_overrides", {})}
 
 
 def search_placement(contour, grid, cfg, inners=None):
@@ -1181,11 +1191,12 @@ def search_placement(contour, grid, cfg, inners=None):
         if any(not _placement_far(params, q) for q in chosen_params):
             continue                                   # skip near-duplicate placement
         placed = place(contour, *params)
-        # Re-check on the placed FULL contour: stage 1 judged a simplified,
+        # Re-check on the placed FULL contour. Stage 1 judges a simplified,
         # 250-point proxy, which can pull a limb back out of the water that the
-        # real outline still dips into. Probed at the proxy's resolution so the
-        # two stages agree on what "on land" means.
-        if not on_land(resample(placed, n=_LAND_PROBE_N), grid, cfg):
+        # real outline still dips into -- and the proxy is what made the guard
+        # and the reported land fraction disagree. This is the authoritative
+        # test, over every point of the outline the user will actually see.
+        if not on_land(placed, grid, cfg):
             continue
         chosen_params.append(params)
         route, _, _, target = build_route(grid, placed, cfg, return_target=True)

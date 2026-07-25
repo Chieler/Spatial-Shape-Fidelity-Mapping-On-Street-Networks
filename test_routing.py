@@ -109,6 +109,8 @@ def warp_reference_checks(lattice, outer, cfg):
     bent = gen.resample(placed, n=97) + 0.01              # a stand-in deformation
     check(np.allclose(gen.warp_reference(placed, bent, 0.0), placed),
           "warp_reference: 0.0 keeps the rigid original as the yardstick")
+    check(gen.warp_reference(placed, placed, 1.0) is placed,
+          "warp_reference: no bend (target is the placement) -> no forgiveness")
     check(np.allclose(gen.warp_reference(placed, bent, 1.0), bent),
           "warp_reference: 1.0 judges against the deformed shape")
     half = gen.warp_reference(placed, bent, 0.5)
@@ -170,6 +172,20 @@ def dispatch_checks():
           and d_star["template_vertices"] is None,
           "auto dispatch: star -> classic engine (raw template, no bend)")
     same = gen._dispatch_engine(star, {**cfg, "engine": None})
+    # A preset is a default bundle, not a veto: cfg_overrides survive dispatch.
+    # Without this a caller's aspect_max is silently restored to the family's,
+    # and every control built on that knob becomes a no-op.
+    forced = gen._dispatch_engine(
+        star, {**gen.CONFIG, "engine": "classic", "aspect_max": 1.8,
+               "bend_template": True,
+               "cfg_overrides": {"aspect_max": 1.8, "bend_template": True}})
+    check(forced["aspect_max"] == 1.8 and forced["bend_template"] is True,
+          "dispatch: cfg_overrides win over the engine preset")
+    clobbered = gen._dispatch_engine(star, {**gen.CONFIG, "engine": "classic",
+                                            "aspect_max": 1.8})
+    check(clobbered["aspect_max"] == gen.ENGINE_PRESETS["classic"]["aspect_max"],
+          "dispatch: without cfg_overrides the preset still sets the family default")
+
     check("template_vertices" in same and same.get("engine") is None,
           "engine=None disables dispatch (cfg used as-is)")
 

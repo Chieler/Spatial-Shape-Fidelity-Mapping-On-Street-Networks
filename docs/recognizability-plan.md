@@ -177,6 +177,16 @@ against the shape as actually deformed. It belongs *next to* the warp caps —
 raising one without the other is the no-op described above. Callers exposing a
 user-facing "how much may this be warped" control should move both together.
 
+A second, blunter reason the caps looked inert: `_dispatch_engine` re-applied
+`ENGINE_PRESETS[engine]` **over** the caller's cfg, so a request for
+`aspect_max=1.8` was silently restored to the classic family's `1.25` on entry
+to `search_placement`. A preset is a default bundle, not a veto — anything in
+`cfg.cfg_overrides` is now re-applied on top of it. Measured end to end on
+Manhattan (star, radius 1600 m), sliding a caller-side warp control 0 → 1 with
+both fixes in place moves the winning route from 11.9 km to 7.5 km and drops
+Hausdorff-to-template from 0.105 to 0.079; before, the three settings returned
+byte-identical geometry.
+
 ## Follow-ups
 - ~~Implement the **feature ledger** metric (§2)~~ **done**: `feature_ledger`
   in gen.py (macro-corners via RDP, cyclic order-preserving DP matching,
